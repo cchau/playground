@@ -1,6 +1,11 @@
 package com.interview;
 
 import java.util.concurrent.*;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+
+import org.apache.commons.lang3.tuple.*;
 
 /**
  * The idea is to maintain a queue which keeps track of whether a ticker is currently being updated for a given company
@@ -9,8 +14,10 @@ import java.util.concurrent.*;
 public class StockTickerUpdater {
 
     // ajay.mat80@gmail.com
+    final Lock lock = new ReentrantLock();
+    final Condition latestTickerFound = lock.newCondition();
     private CompanyTicker[] tickers;
-    private BlockingQueue<String> queue = new LinkedBlockingQueue<>();
+    private BlockingQueue<ImmutablePair<Integer, CompanyTicker>> queue = new LinkedBlockingQueue<>();
     private ExecutorService executors = Executors.newFixedThreadPool(8);
 
     public StockTickerUpdater(CompanyTicker[] tickers) {
@@ -18,60 +25,57 @@ public class StockTickerUpdater {
     }
 
     private void updateStockTickers() {
-        if(tickers == null || tickers.length == 0) {
-            throw new IllegalArgumentException();
+        if (tickers == null || tickers.length == 0) {
+            throw new IllegalArgumentException("Empty Tickers");
         }
         try {
-            if (tickers.length > 0) {
-                for (int i = 0; i < tickers.length; i++) {
 
-                    CompanyTicker ticker = tickers[i];
-                    // Uncomment to get the latest ticker from the same company which are streaming in consecutively
-                    // This reduce the redundant updates that it needs to make for the same company
-//                    int j = i+1;
-//                    if(j < tickers.length) {
-//                        while (ticker.getCompanyName().equals(tickers[j].getCompanyName())) {
-//                            ticker = tickers[j];
-//                            i = j;
-//                            j++;
-//                        }
-//                    }
-
-                    CompanyTicker finalTicker = ticker;
-                    if(!queue.contains(finalTicker.getCompanyName())) {
-                        updateCompanyData(finalTicker);
-                    } else {
-                        while (!queue.isEmpty() && queue.contains(finalTicker.getCompanyName())) {
-                            Thread.sleep(100);
-                        }
-                        updateCompanyData(finalTicker);
-                    }
-                }
+            for (int i = 0; i < tickers.length; i++) {
+                updateCompanyData(i, tickers[i]);
             }
+
+            executors.shutdown();
+            executors.awaitTermination(5, TimeUnit.MINUTES);
+
         } catch (InterruptedException e) {
             e.printStackTrace();
         } finally {
-            executors.shutdown();
             queue.clear();
         }
+
     }
 
 
-
     // I imagine this is some long IO operation such as writing to a database
-    private void updateCompanyData(CompanyTicker companyTicker) throws InterruptedException {
-        if(companyTicker == null) {
+    private void updateCompanyData(int index, CompanyTicker companyTicker) throws InterruptedException {
+        if (companyTicker == null) {
             throw new IllegalArgumentException();
         }
-        queue.add(companyTicker.getCompanyName());
+        queue.add(new ImmutablePair<>(index, companyTicker));
         executors.execute(() -> {
             try {
-                Thread.sleep(1000);
+                Thread.sleep((long) (Math.random() + 0.5) * 1000);
+                lock.lock();
+                while (true) {
+                    ImmutablePair<Integer, CompanyTicker> tickerTuple = queue.peek();
+                    int currentIndex = tickerTuple.left;
+
+                    if (index != currentIndex) {
+                        latestTickerFound.await();
+                    } else {
+                        break;
+                    }
+                }
+
+                latestTickerFound.signalAll();
+                queue.take();
+                System.out.println("Taken!");
                 System.out.println("company = " + companyTicker);
+
+
+                lock.unlock();
             } catch (InterruptedException e) {
                 e.printStackTrace();
-            } finally {
-                queue.remove(companyTicker.getCompanyName());
             }
         });
 
